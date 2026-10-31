@@ -1,0 +1,47 @@
+# Dados operacionais e comerciais
+/Relatorios/
+/Backups/
+/Entradas CSV/
+/Historico/
+/HISTORICO.md
+Banco de dados*.txt
+Banco.txt
+produtos*.txt
+duplicidades_confirmadas.txt
+validacao_api.txt
+*.csv
+*.log
+*.bak
+*.sqlite*
+*.db
+*.dat
+*.tmp
+*.lnk
+
+# Credenciais e configuração da instalação
+config.ini
+.env
+.env.*
+!.env.example
+
+# Cache e ambientes de desenvolvimento
+__pycache__/
+*.py[cod]
+.venv/
+.idea/
+.vscode/
+.pytest_cache/
+Thumbs.db
+desktop.ini
+
+# Materiais de terceiros: redistribuição não confirmada
+*.jar
+*.pdf
+
+# Arquivos auxiliares de bancos e execução local
+*.db-wal
+*.db-shm
+*.db-journal
+execucao.lock
+/BackupsImplantacao/
+/Automacao_backup*/
