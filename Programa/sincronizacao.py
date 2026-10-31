@@ -107,7 +107,7 @@ class Base:
         if 'pendencia' not in {r[1] for r in self.db.execute('PRAGMA table_info(produtos)')}:
             self.db.execute("ALTER TABLE produtos ADD COLUMN pendencia TEXT NOT NULL DEFAULT ''");self.db.commit()
         colunas={r[1] for r in self.db.execute('PRAGMA table_info(produtos)')}
-        for nome,tipo in [('ordem_csv','INTEGER NOT NULL DEFAULT 2147483647'),('codigo_pai',"TEXT NOT NULL DEFAULT ''"),('variacao',"TEXT NOT NULL DEFAULT ''"),('dados_recebidos',"TEXT NOT NULL DEFAULT ''"),('id_pai',"TEXT NOT NULL DEFAULT ''")]:
+        for nome,tipo in [('ordem_csv','INTEGER NOT NULL DEFAULT 2147483647'),('codigo_pai',"TEXT NOT NULL DEFAULT ''"),('variacao',"TEXT NOT NULL DEFAULT ''"),('dados_recebidos',"TEXT NOT NULL DEFAULT ''"),('id_pai',"TEXT NOT NULL DEFAULT ''"),('saldo_venda','TEXT')]:
             if nome not in colunas:self.db.execute(f'ALTER TABLE produtos ADD COLUMN {nome} {tipo}')
         self.db.commit()
         self.db.execute('CREATE INDEX IF NOT EXISTS produtos_sku ON produtos(sku)');self.db.commit()
@@ -209,7 +209,7 @@ class Base:
             if len(candidatos)==1:
                 self.db.execute('UPDATE produtos SET id_pai=? WHERE id=?',(candidatos[0],r['id']))
 
-    def payload(self, erros):
+    def payload(self, erros, incluir_estoque=False):
         linhas=[];publicados={}
         todos=[dict(r) for r in self.db.execute('SELECT * FROM produtos ORDER BY ordem_csv,id')]
         nomes=[]
@@ -233,8 +233,63 @@ class Base:
                 erros.append(self.erro({'id':r['id'],'codigo':r['sku']},str(e)+'; mantido o nome próprio do cadastro'))
                 nome=r['nome']
             publicados[ean]=r['id']
-            linhas.append(f"{ean}|{nome}|{r['preco']}")
+            linha=f"{ean}|{nome}|{r['preco']}"
+            if incluir_estoque:
+                if r['saldo_venda'] is None:
+                    raise RuntimeError('Estoque ainda não confirmado para ID ' + r['id'] + '. TXT anterior preservado.')
+                linha += '|' + r['saldo_venda'] + 'UN'
+            linhas.append(linha)
         return '\r\n'.join(linhas).encode('utf-8')
+
+
+def formatar_saldo(valor):
+    """Saldo virtual já desconta reservas; preserva frações e valores negativos."""
+    if valor is None or isinstance(valor, bool):
+        raise ValueError('saldo ausente ou inválido')
+    try:
+        numero = Decimal(str(valor))
+        if not numero.is_finite() or abs(numero) > Decimal('1e15') or numero.as_tuple().exponent < -10:
+            raise ValueError('saldo fora do formato esperado')
+    except (InvalidOperation, TypeError):
+        raise ValueError('saldo inválido') from None
+    if numero == 0:
+        return '0'
+    texto = format(numero, 'f')
+    if '.' in texto:
+        texto = texto.rstrip('0').rstrip('.')
+    return texto.replace('.', ',')
+
+
+def atualizar_estoques(cliente, base, avisar):
+    """Consulta todos os ativos publicáveis, mesmo sem alteração no cadastro."""
+    ids = [r[0] for r in base.db.execute('SELECT id FROM produtos WHERE ativo=1 AND valido=1 ORDER BY id')]
+    saldos = {}
+    for inicio in range(0, len(ids), 100):
+        lote = ids[inicio:inicio + 100]
+        avisar(f'Consultando estoque: {inicio} de {len(ids)} produtos…')
+        try:
+            resposta = cliente.get('/estoques/saldos?' + urlencode({'idsProdutos[]': lote}, doseq=True))
+        except RuntimeError as e:
+            raise RuntimeError('Falha ao consultar estoque. Confira a permissão Controle de Estoque e reconecte após alterar escopos. TXT e período anteriores preservados. ' + str(e)) from e
+        itens = resposta.get('data') if isinstance(resposta, dict) else None
+        if not isinstance(itens, list):
+            raise RuntimeError('Resposta de estoque inválida. TXT e período anteriores preservados.')
+        recebidos = {}
+        for item in itens:
+            produto = item.get('produto') if isinstance(item, dict) else None
+            ident = str(produto.get('id')) if isinstance(produto, dict) else ''
+            if ident not in lote or ident in recebidos:
+                raise RuntimeError('Estoque com ID inesperado ou repetido. TXT e período anteriores preservados.')
+            try:
+                recebidos[ident] = formatar_saldo(item.get('saldoVirtualTotal'))
+            except ValueError as e:
+                raise RuntimeError('Estoque inválido para ID ' + ident + '. TXT e período anteriores preservados.') from e
+        if set(recebidos) != set(lote):
+            raise RuntimeError('Consulta de estoque incompleta. TXT e período anteriores preservados.')
+        saldos.update(recebidos)
+    # Não persiste lotes parciais; o commit ocorre junto da intenção de publicação.
+    base.db.executemany('UPDATE produtos SET saldo_venda=? WHERE id=?', [(saldo, ident) for ident, saldo in saldos.items()])
+    return len(saldos)
 
 
 def assinatura(p):
@@ -385,8 +440,9 @@ def sincronizar(cliente,local,banco=None,avisar=lambda t:None,permitir_reducao=F
             for r in base.db.execute('SELECT id,sku,pendencia FROM produtos WHERE ativo=1 AND (valido=0 OR length(pendencia)>0)'):
                 if f"ID Bling: {r['id']}" not in erros_ids:
                     erros.append(base.erro({'id':r['id'],'codigo':r['sku']},r['pendencia'] or 'sem versão válida publicável; confira cadastro/GTIN no Bling'))
-            dados=base.payload(erros);total=len(dados.splitlines())
-            resumo=f'{total} produtos ativos no TXT; {len(modificados)} cadastros consultados; {removidos} inativados/removidos; {len(erros)} pendências.'
+            estoques=atualizar_estoques(cliente,base,avisar)
+            dados=base.payload(erros,incluir_estoque=True);total=len(dados.splitlines())
+            resumo=f'{total} produtos ativos no TXT; {len(modificados)} cadastros consultados; {removidos} inativados/removidos; {estoques} saldos consultados; {len(erros)} pendências.'
             relatorio=f'Sincronização Bling — {inicio.isoformat()}\r\nSomente ativos. Banco: {banco}\r\n{resumo}\r\n\r\n'+('\r\n'.join(erros) or 'Nenhum erro encontrado.')
             gravar(base.local/'produtos - erros.log',relatorio);gravar(pasta_automacao(banco,'Relatorios')/(banco.stem+' - erros.log'),relatorio)
             duplicidades=relatorio_conflitos(base)

@@ -1,6 +1,6 @@
 # Bling → Gertec TC506
 
-Integração para Windows que consulta o catálogo principal do Bling e publica nome, preço e GTIN/EAN de produtos ativos em um TXT lido pelo TC Server. O preço é o do cadastro principal do ERP; preços de plataformas de venda online não são consultados. A integração não altera produtos no Bling.
+Integração para Windows que consulta o catálogo principal do Bling e publica nome, preço, GTIN/EAN e saldo disponível de produtos ativos em um TXT lido pelo TC Server. O preço é o do cadastro principal do ERP; preços de plataformas de venda online não são consultados. A integração não altera produtos no Bling.
 
 ## Escopo e requisitos
 
@@ -8,7 +8,7 @@ Integração para Windows que consulta o catálogo principal do Bling e publica 
 - Testado em Python 3.12; outras versões não foram testadas.
 - Observação técnica não verificada em versões antigas: o SQL usa `ON CONFLICT ... DO UPDATE`, recurso do SQLite 3.24.0 ou posterior.
 - Bibliotecas padrão do Python, incluindo Tkinter para o painel; não há pacotes externos a instalar.
-- Conta Bling, aplicativo OAuth com permissão de leitura **Produtos** e retorno cadastrado `http://localhost:8765/callback`.
+- Conta Bling, aplicativo OAuth com permissões de leitura **Produtos** e **Controle de Estoque** e retorno cadastrado `http://localhost:8765/callback`.
 - TC Server disponível separadamente e com acesso ao TXT.
 
 ## Estrutura e raiz do repositório
@@ -35,6 +35,7 @@ Automacao/
     test_nomes_produtos.py
     test_conflitos_ean.py
     test_configuracao.py
+    test_estoque.py
   Relatorios/                  arquivos operacionais; ignorados
   Backups/backups_bling/       backups rotativos; ignorados
 ```
@@ -79,7 +80,7 @@ Clique em **Atualizar agora** para sincronizar. A importação CSV inicial é op
 
 Defina o intervalo e use **Instalar/atualizar automação** quando desejar instalar ou atualizar a tarefa. O nome é `Gertec Bling - Sincronizacao incremental`: execução ao entrar no Windows e no intervalo escolhido, normalmente quinze minutos. Depois de instalada, o painel pode ser fechado. O computador deve estar ligado, acordado e com o usuário conectado. Para pausar, desmarque as consultas automáticas e salve as preferências. Alterar o intervalo exige atualizar a tarefa.
 
-A instalação copia os módulos necessários para `%LOCALAPPDATA%\GertecBling\programa`. Editar o código compartilhado não atualiza essa cópia automaticamente. O instalador não cria nem copia o INI. Após atualizar os módulos, feche e reabra painéis antigos e confira a próxima rodada da tarefa.
+A instalação copia os módulos necessários para `%LOCALAPPDATA%\GertecBling\programa`. Editar o código compartilhado não atualiza essa cópia automaticamente. Uma tarefa ainda com módulos antigos pode sobrescrever o TXT no formato anterior e remover o campo de estoque, mesmo após uma execução correta pelo painel novo; após instalar, confira a rodada agendada e a presença de quatro campos no TXT. Feche e reabra os painéis para evitar processos com módulos antigos em memória. O instalador não cria nem copia o INI. Após atualizar os módulos, feche e reabra painéis antigos e confira a próxima rodada da tarefa.
 
 ## Dados locais e credenciais
 
@@ -98,10 +99,10 @@ Esses arquivos ficam fora da raiz do projeto. Não os copie para o GitHub, mesmo
 
 A identidade estável é o **ID do Bling**. SKU aparece nos diagnósticos; EAN é a chave publicada e pode mudar. SQLite armazena também produtos que não podem ir ao TXT, como pais sem GTIN. Quantidade de cadastros analisados não equivale ao número de códigos publicáveis.
 
-O TXT tem formato `EAN|Descrição|Preço`, UTF-8 sem BOM, sem cabeçalho, com quebras CRLF e vírgula decimal. Exemplo inteiramente fictício:
+O TXT tem formato `EAN|Descrição|Preço|EstoqueUN`, UTF-8 sem BOM, sem cabeçalho, com quebras CRLF e vírgula decimal. Exemplo inteiramente fictício:
 
 ```text
-9999999999918|Produto fictício Quantidade:500ml|10,00
+9999999999918|Produto fictício Quantidade:500ml|10,00|2UN
 ```
 
 Nome, preço e EAN são obrigatórios para publicar um produto novo. EAN deve conter somente dígitos ASCII; não há exigência adicional de tamanho ou dígito verificador nesta versão. Preço zero é permitido; preço negativo, não finito ou com fração de centavo é inválido. SKU não substitui GTIN. O CSV usa ID, Código/SKU, Descrição, Preço, Situação, GTIN/EAN e Código Pai; no layout esperado pelo conversor, Descrição está na coluna C, Preço na G e GTIN/EAN na T.
@@ -109,6 +110,18 @@ Nome, preço e EAN são obrigatórios para publicar um produto novo. EAN deve co
 EAN é texto, nunca número. Um código de exatamente doze dígitos recebe um zero inicial para corresponder à leitura configurada do terminal. As formas com doze dígitos e com o zero são consideradas equivalentes. Demais tamanhos são preservados e a normalização não acrescenta zeros repetidamente.
 
 Um produto novo incompleto é ignorado por inteiro, com motivo por ID/SKU. Para um ativo já conhecido, nome/preço inválidos podem preservar a última versão válida. Se o Bling informar explicitamente remoção ou troca de EAN, o código antigo é liberado; ele não deve continuar reservado por uma versão desatualizada.
+
+## Estoque disponível para venda
+
+A sincronização usa `saldoVirtualTotal` de `GET /estoques/saldos`, total de todos os depósitos já descontando reservas, conforme a [referência oficial do Bling](https://developer.bling.com.br/referencia). Não soma novamente depósitos nem desconta reservas uma segunda vez; não usa o saldo consolidado multiempresa.
+
+Cada rodada consulta o saldo de todos os ativos válidos em lotes de até 100 IDs, inclusive quando apenas uma venda ou reposição mudou o estoque. A consulta de cadastros continua incremental. Isso acrescenta aproximadamente uma requisição por cem ativos válidos em cada rodada. Cada variação usa seu próprio ID e saldo. Zero mantém o produto no TXT (`0UN`); frações usam vírgula (`2,5UN`) e saldos negativos são preservados (`-1UN`). O sufixo é sempre `UN`, conforme o formato do terminal acordado para esta integração.
+
+É necessário habilitar **Controle de Estoque** no aplicativo do Bling e autorizar novamente a conexão após alterar os escopos. Falha, saldo inválido, ID repetido/inesperado ou resposta incompleta interrompem a rodada: o TXT anterior e o período confirmado são preservados. Um saldo desconhecido nunca vira zero. O SQLite recebe a coluna `saldo_venda` automaticamente, sem remover os registros existentes. A consulta só é confirmada junto da intenção de publicação; uma publicação pendente anterior é concluída primeiro e o estoque é consultado na rodada seguinte.
+
+O conversor CSV continua gerando o formato legado de três campos, pois não define estoque a partir do CSV. Ao atualizar preços de um TXT com quatro campos, preserva o estoque existente; a ferramenta de adoção de CSV/TXT continua usando o formato legado e a próxima sincronização inclui o estoque consultado. O atraso de exibição combina os intervalos da automação e do TC Server. A exibição de frações e saldos negativos deve ser conferida no equipamento.
+
+Para implantar, preserve uma cópia da base local, habilite a permissão, reconecte pelo painel e use **Instalar/atualizar automação** para atualizar a cópia local. Confira uma rodada e o quarto campo do TXT no equipamento antes de distribuir uma nova versão beta.
 
 ## Nomes de pais e filhos
 
@@ -155,10 +168,10 @@ Arquivo vazio é bloqueado. Redução superior a vinte por cento exige revisão 
 Execute na pasta `Programa`, em Windows:
 
 ```powershell
-python -B -m unittest test_sincronizacao test_normalizacao_ean test_nomes_produtos test_conflitos_ean test_configuracao -v
+python -B -m unittest test_sincronizacao test_normalizacao_ean test_nomes_produtos test_conflitos_ean test_configuracao test_estoque -v
 ```
 
-São **48 testes**: treze em `test_sincronizacao.py`, quatro em `test_normalizacao_ean.py`, oito em `test_nomes_produtos.py`, dez em `test_conflitos_ean.py` e treze em `test_configuracao.py`. Usam bases temporárias e clientes simulados. Cobrem incremental, inclusão/inativação, nome/preço/EAN, dados inválidos, retomada, publicação pendente, redução, normalização, vínculos e colisões. As fixtures de produtos são fictícias e não vêm da instalação real. Não validam firmware, leitor físico, disponibilidade real do Bling nem garantias do compartilhamento de produção.
+São **56 testes**: treze em `test_sincronizacao.py`, quatro em `test_normalizacao_ean.py`, oito em `test_nomes_produtos.py`, dez em `test_conflitos_ean.py` treze em `test_configuracao.py` e oito em `test_estoque.py`. Usam bases temporárias e clientes simulados. Cobrem incremental, inclusão/inativação, nome/preço/EAN, dados inválidos, retomada, publicação pendente, redução, normalização, vínculos e colisões. As fixtures de produtos são fictícias e não vêm da instalação real. Não validam firmware, leitor físico, disponibilidade real do Bling nem garantias do compartilhamento de produção.
 
 ## Licença e materiais de terceiros
 

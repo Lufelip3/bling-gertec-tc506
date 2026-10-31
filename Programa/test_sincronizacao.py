@@ -27,6 +27,9 @@ class Fake:
     def get(self,url):
         self.chamadas.append(url)
         if self.falha and self.falha(url):raise RuntimeError('Falha simulada')
+        if url.startswith('/estoques/saldos?'):
+            ids=parse_qs(urlsplit(url).query)['idsProdutos[]']
+            return {'data':[{'produto':{'id':i},'saldoVirtualTotal':self.catalogo[i].get('saldo_teste',0)} for i in ids]}
         if '?' not in url:return {'data':self.catalogo[url.rsplit('/',1)[1]]}
         q=parse_qs(urlsplit(url).query);criterio=q['criterio'][0]
         if criterio=='2':
@@ -57,7 +60,7 @@ class Teste(unittest.TestCase):
         self.cliente.chamadas=[];self.tempo+=timedelta(minutes=15);self.sync()
         self.assertEqual(primeiro,self.banco.read_bytes())
         self.assertFalse(any('?' not in u for u in self.cliente.chamadas))
-        self.assertTrue(all('data' in u for u in self.cliente.chamadas))
+        self.assertTrue(all('data' in u or u.startswith('/estoques/saldos?') for u in self.cliente.chamadas))
     def test_inclusao_nome_preco_ean_inativacao(self):
         self.sync();self.tempo+=timedelta(minutes=15)
         self.cliente.catalogo['1']=produto(1,nome='Descrição nova',preco='22.90',gtin=ean(100))
@@ -110,7 +113,7 @@ class Teste(unittest.TestCase):
         self.cliente.catalogo['3']=produto(3,situacao='I');self.sync()
         self.assertNotIn(ean(3).encode(),self.banco.read_bytes())
         for u in self.cliente.chamadas:
-            if '?' in u:self.assertIn(parse_qs(urlsplit(u).query)['criterio'][0],['2','3','4'])
+            if u.startswith('/produtos?'):self.assertIn(parse_qs(urlsplit(u).query)['criterio'][0],['2','3','4'])
     def test_retomada_carga_inicial(self):
         self.cliente=Fake([produto(i) for i in range(1,26)])
         self.cliente.falha=lambda u:u=='/produtos/23'

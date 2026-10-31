@@ -94,7 +94,7 @@ def converter(entrada, saida, atualizar=False):
             if not linha.strip():
                 continue
             campos = linha.split("|")
-            if len(campos) != 3 or not campos[0].strip():
+            if len(campos) not in (3, 4) or not campos[0].strip():
                 raise ValueError(f"Banco inválido na linha {numero_base}. Nenhuma atualização realizada.")
             ean_base = normalizar_ean(campos[0])
             if ean_base in indice:
